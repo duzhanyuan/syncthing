@@ -1194,8 +1194,12 @@ nextSub:
 		return err
 	}
 
-	batchSize := 100
-	batch := make([]protocol.FileInfo, 0, batchSize)
+	batchSizeFiles := 100
+	batchSizeBlocks := 2048 // about 256 MB
+
+	batch := make([]protocol.FileInfo, 0, batchSizeFiles)
+	blocksHandled := 0
+
 	for f := range fchan {
 		events.Default.Log(events.LocalIndexUpdated, map[string]interface{}{
 			"folder":   folder,
@@ -1204,13 +1208,15 @@ nextSub:
 			"flags":    fmt.Sprintf("0%o", f.Flags),
 			"size":     f.Size(),
 		})
-		if len(batch) == batchSize {
+		blocksHandled += len(f.Blocks)
+		if len(batch) == batchSizeFiles || blocksHandled > batchSizeBlocks {
 			if err := m.CheckFolderHealth(folder); err != nil {
 				l.Infof("Stopping folder %s mid-scan due to folder error: %s", folder, err)
 				return err
 			}
 			fs.Update(protocol.LocalDeviceID, batch)
 			batch = batch[:0]
+			blocksHandled = 0
 		}
 		batch = append(batch, f)
 	}
@@ -1247,7 +1253,7 @@ nextSub:
 				return true
 			}
 
-			if len(batch) == batchSize {
+			if len(batch) == batchSizeFiles {
 				fs.Update(protocol.LocalDeviceID, batch)
 				batch = batch[:0]
 			}
