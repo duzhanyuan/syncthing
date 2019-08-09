@@ -2,34 +2,21 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
 package integration
 
 import (
-	"io/ioutil"
 	"log"
 	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/syncthing/protocol"
-	"github.com/syncthing/syncthing/internal/config"
-	"github.com/syncthing/syncthing/internal/symlinks"
+	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/rc"
 )
-
-func symlinksSupported() bool {
-	tmp, err := ioutil.TempDir("", "symlink-test")
-	if err != nil {
-		return false
-	}
-	defer os.RemoveAll(tmp)
-	err = os.Symlink("tmp", filepath.Join(tmp, "link"))
-	return err == nil
-}
 
 func TestSymlinks(t *testing.T) {
 	if !symlinksSupported() {
@@ -42,6 +29,8 @@ func TestSymlinks(t *testing.T) {
 	fld := cfg.Folders()["default"]
 	fld.Versioning = config.VersioningConfiguration{}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testSymlinks(t)
@@ -61,6 +50,8 @@ func TestSymlinksSimpleVersioning(t *testing.T) {
 		Params: map[string]string{"keep": "5"},
 	}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testSymlinks(t)
@@ -79,6 +70,8 @@ func TestSymlinksStaggeredVersioning(t *testing.T) {
 		Type: "staggered",
 	}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testSymlinks(t)
@@ -119,7 +112,7 @@ func testSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd.Close()
-	err = symlinks.Create("s1/fileLink", "file", 0)
+	err = os.Symlink("file", "s1/fileLink")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -130,95 +123,52 @@ func testSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = symlinks.Create("s1/dirLink", "dir", 0)
+	err = os.Symlink("dir", "s1/dirLink")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// A link to something in the repo that does not exist
 
-	err = symlinks.Create("s1/noneLink", "does/not/exist", 0)
+	err = os.Symlink("does/not/exist", "s1/noneLink")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// A link we will replace with a file later
 
-	err = symlinks.Create("s1/repFileLink", "does/not/exist", 0)
+	err = os.Symlink("does/not/exist", "s1/repFileLink")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// A link we will replace with a directory later
 
-	err = symlinks.Create("s1/repDirLink", "does/not/exist", 0)
+	err = os.Symlink("does/not/exist", "s1/repDirLink")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// A link we will remove later
 
-	err = symlinks.Create("s1/removeLink", "does/not/exist", 0)
+	err = os.Symlink("does/not/exist", "s1/removeLink")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Verify that the files and symlinks sync to the other side
 
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
 	log.Println("Syncing...")
-
-	sender := syncthingProcess{ // id1
-		instance: "1",
-		argv:     []string{"-home", "h1"},
-		port:     8081,
-		apiKey:   apiKey,
-	}
-	err = sender.start()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	receiver := syncthingProcess{ // id2
-		instance: "2",
-		argv:     []string{"-home", "h2"},
-		port:     8082,
-		apiKey:   apiKey,
-	}
-	err = receiver.start()
-	if err != nil {
-		_ = sender.stop()
-		t.Fatal(err)
-	}
-
-	for {
-		comp, err := sender.peerCompletion()
-		if err != nil {
-			if isTimeout(err) {
-				time.Sleep(time.Second)
-				continue
-			}
-			_ = sender.stop()
-			_ = receiver.stop()
-			t.Fatal(err)
-		}
-
-		curComp := comp[id2]
-
-		if curComp == 100 {
-			break
-		}
-
-		time.Sleep(time.Second)
-	}
-
-	err = sender.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = receiver.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	log.Println("Comparing directories...")
 	err = compareDirectories("s1", "s2")
@@ -241,7 +191,7 @@ func testSymlinks(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = symlinks.Create("s1/dirLink", "file", 0)
+	err = os.Symlink("file", "s1/dirLink")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -277,7 +227,7 @@ func testSymlinks(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = symlinks.Create("s1/fileToReplace", "somewhere/non/existent", 0)
+	err = os.Symlink("somewhere/non/existent", "s1/fileToReplace")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -288,7 +238,7 @@ func testSymlinks(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = symlinks.Create("s1/dirToReplace", "somewhere/non/existent", 0)
+	err = os.Symlink("somewhere/non/existent", "s1/dirToReplace")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -304,46 +254,11 @@ func testSymlinks(t *testing.T) {
 
 	log.Println("Syncing...")
 
-	err = sender.start()
-	if err != nil {
+	if err := sender.Rescan("default"); err != nil {
 		t.Fatal(err)
 	}
 
-	err = receiver.start()
-	if err != nil {
-		_ = sender.stop()
-		t.Fatal(err)
-	}
-
-	for {
-		comp, err := sender.peerCompletion()
-		if err != nil {
-			if isTimeout(err) {
-				time.Sleep(time.Second)
-				continue
-			}
-			_ = sender.stop()
-			_ = receiver.stop()
-			t.Fatal(err)
-		}
-
-		curComp := comp[id2]
-
-		if curComp == 100 {
-			break
-		}
-
-		time.Sleep(time.Second)
-	}
-
-	err = sender.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = receiver.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	log.Println("Comparing directories...")
 	err = compareDirectories("s1", "s2")

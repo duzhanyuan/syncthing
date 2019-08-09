@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -12,12 +12,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
+	"os"
 	"testing"
-	"time"
 
-	"github.com/syncthing/protocol"
-	"github.com/syncthing/syncthing/internal/config"
-	"github.com/syncthing/syncthing/internal/osutil"
+	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/rc"
 )
 
 func TestManyPeers(t *testing.T) {
@@ -33,29 +33,19 @@ func TestManyPeers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	receiver := syncthingProcess{ // id2
-		instance: "2",
-		argv:     []string{"-home", "h2"},
-		port:     8082,
-		apiKey:   apiKey,
-	}
-	err = receiver.start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer receiver.stop()
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
+	receiver.ResumeAll()
 
-	resp, err := receiver.get("/rest/system/config")
+	bs, err := receiver.Get("/rest/system/config")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("Code %d != 200", resp.StatusCode)
 	}
 
 	var cfg config.Configuration
-	json.NewDecoder(resp.Body).Decode(&cfg)
-	resp.Body.Close()
+	if err := json.Unmarshal(bs, &cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	for len(cfg.Devices) < 100 {
 		bs := make([]byte, 16)
@@ -65,47 +55,21 @@ func TestManyPeers(t *testing.T) {
 		cfg.Folders[0].Devices = append(cfg.Folders[0].Devices, config.FolderDeviceConfiguration{DeviceID: id})
 	}
 
-	osutil.Rename("h2/config.xml", "h2/config.xml.orig")
-	defer osutil.Rename("h2/config.xml.orig", "h2/config.xml")
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 
 	var buf bytes.Buffer
 	json.NewEncoder(&buf).Encode(cfg)
-	resp, err = receiver.post("/rest/system/config", &buf)
+	_, err = receiver.Post("/rest/system/config", &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("Code %d != 200", resp.StatusCode)
-	}
-	resp.Body.Close()
 
-	log.Println("Starting up...")
-	sender := syncthingProcess{ // id1
-		instance: "1",
-		argv:     []string{"-home", "h1"},
-		port:     8081,
-		apiKey:   apiKey,
-	}
-	err = sender.start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sender.stop()
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+	sender.ResumeAll()
 
-	for {
-		comp, err := sender.peerCompletion()
-		if err != nil {
-			if isTimeout(err) {
-				time.Sleep(250 * time.Millisecond)
-				continue
-			}
-			t.Fatal(err)
-		}
-		if comp[id2] == 100 {
-			return
-		}
-		time.Sleep(2 * time.Second)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	log.Println("Comparing directories...")
 	err = compareDirectories("s1", "s2")

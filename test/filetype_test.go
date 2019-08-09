@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -12,10 +12,10 @@ import (
 	"log"
 	"os"
 	"testing"
-	"time"
 
-	"github.com/syncthing/protocol"
-	"github.com/syncthing/syncthing/internal/config"
+	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/rc"
 )
 
 func TestFileTypeChange(t *testing.T) {
@@ -25,6 +25,8 @@ func TestFileTypeChange(t *testing.T) {
 	fld := cfg.Folders()["default"]
 	fld.Versioning = config.VersioningConfiguration{}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testFileTypeChange(t)
@@ -40,6 +42,8 @@ func TestFileTypeChangeSimpleVersioning(t *testing.T) {
 		Params: map[string]string{"keep": "5"},
 	}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testFileTypeChange(t)
@@ -54,6 +58,8 @@ func TestFileTypeChangeStaggeredVersioning(t *testing.T) {
 		Type: "staggered",
 	}
 	cfg.SetFolder(fld)
+	os.Rename("h2/config.xml", "h2/config.xml.orig")
+	defer os.Rename("h2/config.xml.orig", "h2/config.xml")
 	cfg.Save()
 
 	testFileTypeChange(t)
@@ -74,11 +80,11 @@ func testFileTypeChange(t *testing.T) {
 
 	// A file that we will replace with a directory later
 
-	fd, err := os.Create("s1/fileToReplace")
-	if err != nil {
+	if fd, err := os.Create("s1/fileToReplace"); err != nil {
 		t.Fatal(err)
+	} else {
+		fd.Close()
 	}
-	fd.Close()
 
 	// A directory that we will replace with a file later
 
@@ -93,68 +99,29 @@ func testFileTypeChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd, err = os.Create("s1/dirToReplace/emptyFile")
-	if err != nil {
+	if fd, err := os.Create("s1/dirToReplace/emptyFile"); err != nil {
 		t.Fatal(err)
+	} else {
+		fd.Close()
 	}
-	fd.Close()
 
 	// Verify that the files and directories sync to the other side
 
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
 	log.Println("Syncing...")
 
-	sender := syncthingProcess{ // id1
-		instance: "1",
-		argv:     []string{"-home", "h1"},
-		port:     8081,
-		apiKey:   apiKey,
-	}
-	err = sender.start()
-	if err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
-	receiver := syncthingProcess{ // id2
-		instance: "2",
-		argv:     []string{"-home", "h2"},
-		port:     8082,
-		apiKey:   apiKey,
-	}
-	err = receiver.start()
-	if err != nil {
-		_ = sender.stop()
-		t.Fatal(err)
-	}
-
-	for {
-		comp, err := sender.peerCompletion()
-		if err != nil {
-			if isTimeout(err) {
-				time.Sleep(time.Second)
-				continue
-			}
-			_ = sender.stop()
-			_ = receiver.stop()
-			t.Fatal(err)
-		}
-
-		curComp := comp[id2]
-
-		if curComp == 100 {
-			_ = sender.stop()
-			_ = receiver.stop()
-			break
-		}
-
-		time.Sleep(time.Second)
-	}
-
-	err = sender.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = receiver.stop()
-	if err != nil {
+	// Delay scans for the moment
+	if err := sender.RescanDelay("default", 86400); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,11 +150,11 @@ func testFileTypeChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd, err = os.Create("s1/emptyDirToReplace")
-	if err != nil {
+	if fd, err := os.Create("s1/emptyDirToReplace"); err != nil {
 		t.Fatal(err)
+	} else {
+		fd.Close()
 	}
-	fd.Close()
 
 	// Clear directory and replace with file
 
@@ -195,56 +162,21 @@ func testFileTypeChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd, err = os.Create("s1/dirToReplace")
-	if err != nil {
+	if fd, err := os.Create("s1/dirToReplace"); err != nil {
 		t.Fatal(err)
+	} else {
+		fd.Close()
 	}
-	fd.Close()
 
 	// Sync these changes and recheck
 
 	log.Println("Syncing...")
 
-	err = sender.start()
-	if err != nil {
+	if err := sender.Rescan("default"); err != nil {
 		t.Fatal(err)
 	}
 
-	err = receiver.start()
-	if err != nil {
-		_ = sender.stop()
-		t.Fatal(err)
-	}
-
-	for {
-		comp, err := sender.peerCompletion()
-		if err != nil {
-			if isTimeout(err) {
-				time.Sleep(time.Second)
-				continue
-			}
-			_ = sender.stop()
-			_ = receiver.stop()
-			t.Fatal(err)
-		}
-
-		curComp := comp[id2]
-
-		if curComp == 100 {
-			break
-		}
-
-		time.Sleep(time.Second)
-	}
-
-	err = sender.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = receiver.stop()
-	if err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	log.Println("Comparing directories...")
 	err = compareDirectories("s1", "s2")

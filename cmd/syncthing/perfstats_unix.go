@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build !solaris,!windows
 
@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/syncthing/protocol"
+	"github.com/syncthing/syncthing/lib/protocol"
 )
 
 func init() {
@@ -38,7 +38,10 @@ func savePerfStats(file string) {
 
 	t0 := time.Now()
 	for t := range time.NewTicker(250 * time.Millisecond).C {
-		syscall.Getrusage(syscall.RUSAGE_SELF, &rusage)
+		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
+			continue
+		}
+
 		curTime := time.Now().UnixNano()
 		timeDiff := curTime - prevTime
 		curUsage := rusage.Utime.Nano() + rusage.Stime.Nano()

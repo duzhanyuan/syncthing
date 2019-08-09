@@ -4,138 +4,96 @@ IFS=$'\n\t'
 
 STTRACE=${STTRACE:-}
 
+script() {
+	name="$1"
+	shift
+	go run "script/$name.go" "$@"
+}
+
+build() {
+	go run build.go "$@"
+}
+
 case "${1:-default}" in
 	default)
-		go run build.go
+		build
 		;;
 
 	clean)
-		go run build.go "$1"
-		;;
-
-	test)
-		ulimit -t 60 &>/dev/null || true
-		ulimit -d 512000 &>/dev/null || true
-		ulimit -m 512000 &>/dev/null || true
-
-		go run build.go "$1"
+		build "$@"
 		;;
 
 	tar)
-		go run build.go "$1"
-		;;
-
-	deps)
-		go run build.go "$1"
+		build "$@"
 		;;
 
 	assets)
-		go run build.go "$1"
+		build "$@"
 		;;
 
 	xdr)
-		go run build.go "$1"
+		build "$@"
 		;;
 
 	translate)
-		go run build.go "$1"
+		build "$@"
 		;;
 
-	transifex)
-		go run build.go "$1"
-		;;
-
-	noupgrade)
-		go run build.go -no-upgrade tar
-		;;
-
-	all)
-		go run build.go -goos darwin -goarch amd64 tar
-		go run build.go -goos darwin -goarch 386 tar
-
-		go run build.go -goos dragonfly -goarch 386 tar
-		go run build.go -goos dragonfly -goarch amd64 tar
-
-		go run build.go -goos freebsd -goarch 386 tar
-		go run build.go -goos freebsd -goarch amd64 tar
-
-		go run build.go -goos linux -goarch 386 tar
-		go run build.go -goos linux -goarch amd64 tar
-		go run build.go -goos linux -goarch arm tar
-
-		go run build.go -goos netbsd -goarch 386 tar
-		go run build.go -goos netbsd -goarch amd64 tar
-
-		go run build.go -goos openbsd -goarch 386 tar
-		go run build.go -goos openbsd -goarch amd64 tar
-
-		go run build.go -goos solaris -goarch amd64 tar
-
-		go run build.go -goos windows -goarch 386 zip
-		go run build.go -goos windows -goarch amd64 zip
+	deb)
+		build "$@"
 		;;
 
 	setup)
-		echo "Don't worry, just build."
+		build "$@"
 		;;
 
-	test-cov)
-		ulimit -t 600 &>/dev/null || true
-		ulimit -d 512000 &>/dev/null || true
-		ulimit -m 512000 &>/dev/null || true
+	test)
+		LOGGER_DISCARD=1 build test
+		;;
 
-		go get github.com/axw/gocov/gocov
-		go get github.com/AlekSi/gocov-xml
+	bench)
+		LOGGER_DISCARD=1 build bench | script benchfilter
+		;;
 
-		echo "mode: set" > coverage.out
-		fail=0
+	prerelease)
+		go run script/authors.go
+		build transifex
+		pushd man ; ./refresh.sh ; popd
+		git add -A gui man AUTHORS
+		git commit -m 'gui, man, authors: Update docs, translations, and contributors'
+		;;
 
-		# For every package in the repo
-		for dir in $(go list ./...) ; do
-			# run the tests
-			godep go test -coverprofile=profile.out $dir
-			if [ -f profile.out ] ; then
-				# and if there was test output, append it to coverage.out
-				grep -v "mode: set" profile.out >> coverage.out
-				rm profile.out
+	noupgrade)
+		build -no-upgrade tar
+		;;
+
+	all)
+		platforms=(
+			darwin-amd64 dragonfly-amd64 freebsd-amd64 linux-amd64 netbsd-amd64 openbsd-amd64 solaris-amd64 windows-amd64
+			freebsd-386 linux-386 netbsd-386 openbsd-386 windows-386
+			linux-arm linux-arm64 linux-ppc64 linux-ppc64le
+		)
+
+		for plat in "${platforms[@]}"; do
+			echo Building "$plat"
+
+			goos="${plat%-*}"
+			goarch="${plat#*-}"
+			dist="tar"
+
+			if [[ $goos == "windows" ]]; then
+				dist="zip"
 			fi
+
+			build -goos "$goos" -goarch "$goarch" "$dist"
+			echo
 		done
-
-		gocov convert coverage.out | gocov-xml > coverage.xml
-
-		# This is usually run from within Jenkins. If it is, we need to
-		# tweak the paths in coverage.xml so cobertura finds the
-		# source.
-		if [[ "${WORKSPACE:-default}" != "default" ]] ; then
-			sed "s#$WORKSPACE##g" < coverage.xml > coverage.xml.new && mv coverage.xml.new coverage.xml
-		fi
 		;;
 
-	docker-all)
-		docker run --rm -h syncthing-builder -u $(id -u) -t \
-			-v $(pwd):/go/src/github.com/syncthing/syncthing \
-			-w /go/src/github.com/syncthing/syncthing \
-			-e "STTRACE=$STTRACE" \
-			syncthing/build:latest \
-			sh -c './build.sh clean \
-				&& go tool vet -composites=false cmd/*/*.go internal/*/*.go \
-				&& ( golint ./cmd/... ; golint ./internal/... ) | egrep -v "comment on exported|should have comment" \
-				&& ./build.sh all \
-				&& STTRACE=all ./build.sh test-cov'
-		;;
+	test-xunit)
 
-	docker-test)
-		docker run --rm -h syncthing-builder -u $(id -u) -t \
-			-v $(pwd):/go/src/github.com/syncthing/syncthing \
-			-w /go/src/github.com/syncthing/syncthing \
-			-e "STTRACE=$STTRACE" \
-			syncthing/build:latest \
-			sh -euxc './build.sh clean \
-				&& go run build.go -race \
-				&& export GOPATH=$(pwd)/Godeps/_workspace:$GOPATH \
-				&& cd test \
-				&& go test -tags integration -v -timeout 90m -short \
-				&& git clean -fxd .'
+		(GOPATH="$(pwd)/Godeps/_workspace:$GOPATH" go test -v -race ./lib/... ./cmd/... || true) > tests.out
+		go2xunit -output tests.xml -fail < tests.out
 		;;
 
 	*)

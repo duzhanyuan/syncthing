@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package main
 
@@ -11,45 +11,39 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
-	"github.com/syncthing/protocol"
-	"github.com/syncthing/syncthing/internal/db"
-	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syncthing/syncthing/lib/db"
 )
 
 func main() {
+	var mode string
 	log.SetFlags(0)
 	log.SetOutput(os.Stdout)
 
-	folder := flag.String("folder", "default", "Folder ID")
-	device := flag.String("device", "", "Device ID (blank for global)")
+	flag.StringVar(&mode, "mode", "dump", "Mode of operation: dump, dumpsize, idxck")
+
 	flag.Parse()
 
-	ldb, err := leveldb.OpenFile(flag.Arg(0), nil)
+	path := flag.Arg(0)
+	if path == "" {
+		path = filepath.Join(defaultConfigDir(), "index-v0.14.0.db")
+	}
+
+	ldb, err := db.OpenRO(path)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fs := db.NewFileSet(*folder, ldb)
-
-	if *device == "" {
-		log.Printf("*** Global index for folder %q", *folder)
-		fs.WithGlobalTruncated(func(fi db.FileIntf) bool {
-			f := fi.(db.FileInfoTruncated)
-			fmt.Println(f)
-			fmt.Println("\t", fs.Availability(f.Name))
-			return true
-		})
-	} else {
-		n, err := protocol.DeviceIDFromString(*device)
-		if err != nil {
-			log.Fatal(err)
+	if mode == "dump" {
+		dump(ldb)
+	} else if mode == "dumpsize" {
+		dumpsize(ldb)
+	} else if mode == "idxck" {
+		if !idxck(ldb) {
+			os.Exit(1)
 		}
-		log.Printf("*** Have index for folder %q device %q", *folder, n)
-		fs.WithHaveTruncated(n, func(fi db.FileIntf) bool {
-			f := fi.(db.FileInfoTruncated)
-			fmt.Println(f)
-			return true
-		})
+	} else {
+		fmt.Println("Unknown mode")
 	}
 }

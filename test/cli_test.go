@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -17,7 +17,7 @@ import (
 )
 
 func TestCLIReset(t *testing.T) {
-	dirs := []string{"h1/index-v0.11.0.db"}
+	dirs := []string{"h1/index-v0.14.0.db"}
 
 	// Create directories that reset will remove
 
@@ -30,7 +30,7 @@ func TestCLIReset(t *testing.T) {
 
 	// Run reset to clean up
 
-	cmd := exec.Command("../bin/syncthing", "-home", "h1", "-reset")
+	cmd := exec.Command("../bin/syncthing", "-no-browser", "-home", "h1", "-reset-database")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	err := cmd.Run()
@@ -64,7 +64,7 @@ func TestCLIGenerate(t *testing.T) {
 
 	// -generate should create a bunch of stuff
 
-	cmd := exec.Command("../bin/syncthing", "-generate", "home.out")
+	cmd := exec.Command("../bin/syncthing", "-no-browser", "-generate", "home.out")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout
 	err = cmd.Run()
@@ -90,7 +90,7 @@ func TestCLIFirstStartup(t *testing.T) {
 
 	// First startup should create config, BEP certificate, and HTTP certificate.
 
-	cmd := exec.Command("../bin/syncthing", "-home", "home.out")
+	cmd := exec.Command("../bin/syncthing", "-no-browser", "-home", "home.out")
 	cmd.Env = append(os.Environ(), "STNORESTART=1")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stdout

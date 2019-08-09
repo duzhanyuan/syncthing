@@ -2,22 +2,25 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
 package integration
 
 import (
+	"bytes"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/syncthing/syncthing/lib/rc"
 )
 
-func TestConflict(t *testing.T) {
+func TestConflictsDefault(t *testing.T) {
 	log.Println("Cleaning...")
 	err := removeAll("s1", "s2", "h1/index*", "h2/index*")
 	if err != nil {
@@ -48,16 +51,24 @@ func TestConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sender, receiver := coSenderReceiver(t)
-	defer sender.stop()
-	defer receiver.stop()
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
 
-	if err = coCompletion(sender, receiver); err != nil {
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
+	// Rescan with a delay on the next one, so we are not surprised by a
+	// sudden rescan while we're trying to introduce conflicts.
+
+	if err := sender.RescanDelay("default", 86400); err != nil {
 		t.Fatal(err)
 	}
-
-	sender.stop()
-	receiver.stop()
+	if err := receiver.RescanDelay("default", 86400); err != nil {
+		t.Fatal(err)
+	}
+	rc.AwaitSync("default", sender, receiver)
 
 	log.Println("Verifying...")
 
@@ -71,6 +82,10 @@ func TestConflict(t *testing.T) {
 	}
 
 	log.Println("Introducing a conflict (simultaneous edit)...")
+
+	if err := sender.PauseDevice(receiver.ID()); err != nil {
+		t.Fatal(err)
+	}
 
 	fd, err = os.OpenFile("s1/testfile.txt", os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -98,37 +113,37 @@ func TestConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := sender.ResumeDevice(receiver.ID()); err != nil {
+		t.Fatal(err)
+	}
+
 	log.Println("Syncing...")
 
-	err = receiver.start()
-	err = sender.start()
+	if err := sender.RescanDelay("default", 86400); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.RescanDelay("default", 86400); err != nil {
+		t.Fatal(err)
+	}
+	rc.AwaitSync("default", sender, receiver)
+
+	// Expect one conflict file, created on either side.
+
+	files, err := filepath.Glob("s?/*sync-conflict*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err != nil {
-		sender.stop()
-		t.Fatal(err)
-	}
-
-	if err = coCompletion(sender, receiver); err != nil {
-		t.Fatal(err)
-	}
-
-	sender.stop()
-	receiver.stop()
-
-	// The conflict is expected on the s2 side due to how we calculate which
-	// file is the winner (based on device ID)
-
-	files, err := filepath.Glob("s2/*sync-conflict*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 1 {
-		t.Errorf("Expected 1 conflicted files instead of %d", len(files))
+	if len(files) != 2 {
+		t.Errorf("Expected 1 conflicted file on each side, instead of totally %d", len(files))
+	} else if filepath.Base(files[0]) != filepath.Base(files[1]) {
+		t.Errorf(`Expected same conflicted file on both sides, got "%v" and "%v"`, files[0], files[1])
 	}
 
 	log.Println("Introducing a conflict (edit plus delete)...")
+
+	if err := sender.PauseDevice(receiver.ID()); err != nil {
+		t.Fatal(err)
+	}
 
 	err = os.Remove("s1/testfile.txt")
 	if err != nil {
@@ -148,38 +163,41 @@ func TestConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := sender.ResumeDevice(receiver.ID()); err != nil {
+		t.Fatal(err)
+	}
+
 	log.Println("Syncing...")
 
-	err = receiver.start()
-	err = sender.start()
-	if err != nil {
+	if err := sender.RescanDelay("default", 86400); err != nil {
 		t.Fatal(err)
 	}
-	if err != nil {
-		sender.stop()
+	if err := receiver.RescanDelay("default", 86400); err != nil {
 		t.Fatal(err)
 	}
+	rc.AwaitSync("default", sender, receiver)
 
-	if err = coCompletion(sender, receiver); err != nil {
-		t.Fatal(err)
-	}
-
-	sender.stop()
-	receiver.stop()
-
-	// The conflict should manifest on the s2 side again, where we should have
-	// moved the file to a conflict copy instead of just deleting it.
+	// The conflict is resolved to the advantage of the edit over the delete.
+	// As such, we get the edited content synced back to s1 where it was
+	// removed.
 
 	files, err = filepath.Glob("s2/*sync-conflict*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 {
-		t.Errorf("Expected 2 conflicted files instead of %d", len(files))
+	if len(files) != 1 {
+		t.Errorf("Expected 1 conflicted files instead of %d", len(files))
+	}
+	bs, err := ioutil.ReadFile("s1/testfile.txt")
+	if err != nil {
+		t.Error("reading file:", err)
+	}
+	if !bytes.Contains(bs, []byte("more text added to s2")) {
+		t.Error("s1/testfile.txt should contain data added in s2")
 	}
 }
 
-func TestInitialMergeConflicts(t *testing.T) {
+func TestConflictsInitialMerge(t *testing.T) {
 	log.Println("Cleaning...")
 	err := removeAll("s1", "s2", "h1/index*", "h2/index*")
 	if err != nil {
@@ -223,29 +241,38 @@ func TestInitialMergeConflicts(t *testing.T) {
 
 	// Let them sync
 
-	sender, receiver := coSenderReceiver(t)
-	defer sender.stop()
-	defer receiver.stop()
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
 
 	log.Println("Syncing...")
 
-	if err = coCompletion(sender, receiver); err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
-	sender.stop()
-	receiver.stop()
+	// Do it once more so the conflict copies propagate to both sides.
+
+	sender.Rescan("default")
+	receiver.Rescan("default")
+
+	rc.AwaitSync("default", sender, receiver)
+
+	checkedStop(t, sender)
+	checkedStop(t, receiver)
 
 	log.Println("Verifying...")
 
-	// s1 should have three-four files (there's a conflict from s2 which may or may not have synced yet)
+	// s1 should have four files (there's a conflict)
 
 	files, err := filepath.Glob("s1/file*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) < 3 || len(files) > 4 {
-		t.Errorf("Expected 3-4 files in s1 instead of %d", len(files))
+	if len(files) != 4 {
+		t.Errorf("Expected 4 files in s1 instead of %d", len(files))
 	}
 
 	// s2 should have four files (there's a conflict)
@@ -269,7 +296,7 @@ func TestInitialMergeConflicts(t *testing.T) {
 	}
 }
 
-func TestResetConflicts(t *testing.T) {
+func TestConflictsIndexReset(t *testing.T) {
 	log.Println("Cleaning...")
 	err := removeAll("s1", "s2", "h1/index*", "h2/index*")
 	if err != nil {
@@ -302,15 +329,17 @@ func TestResetConflicts(t *testing.T) {
 
 	// Let them sync
 
-	sender, receiver := coSenderReceiver(t)
-	defer sender.stop()
-	defer receiver.stop()
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
 
 	log.Println("Syncing...")
 
-	if err = coCompletion(sender, receiver); err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	log.Println("Verifying...")
 
@@ -324,7 +353,7 @@ func TestResetConflicts(t *testing.T) {
 		t.Errorf("Expected 3 files in s1 instead of %d", len(files))
 	}
 
-	// s2 should have three
+	// s2 should have three files
 
 	files, err = filepath.Glob("s2/file*")
 	if err != nil {
@@ -336,47 +365,29 @@ func TestResetConflicts(t *testing.T) {
 
 	log.Println("Updating...")
 
-	// change s2/file2 a few times, so that it's version counter increases.
+	// change s2/file2 a few times, so that its version counter increases.
 	// This will make the file on the cluster look newer than what we have
 	// locally after we rest the index, unless we have a fix for that.
 
-	err = ioutil.WriteFile("s2/file2", []byte("hello1\n"), 0644)
-	if err != nil {
-		t.Fatal(err)
+	for i := 0; i < 5; i++ {
+		err = ioutil.WriteFile("s2/file2", []byte("hello1\n"), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = receiver.Rescan("default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Second)
 	}
-	err = receiver.rescan("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(time.Second)
-	err = ioutil.WriteFile("s2/file2", []byte("hello2\n"), 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = receiver.rescan("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(time.Second)
-	err = ioutil.WriteFile("s2/file2", []byte("hello3\n"), 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = receiver.rescan("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(time.Second)
 
-	if err = coCompletion(sender, receiver); err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	// Now nuke the index
 
 	log.Println("Resetting...")
 
-	receiver.stop()
+	checkedStop(t, receiver)
 	removeAll("h2/index*")
 
 	// s1/file1 (remote) changes while receiver is down
@@ -387,7 +398,7 @@ func TestResetConflicts(t *testing.T) {
 	}
 
 	// s1 must know about it
-	err = sender.rescan("default")
+	err = sender.Rescan("default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,13 +410,13 @@ func TestResetConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	receiver.start()
+	receiver = startInstance(t, 2)
+	defer checkedStop(t, receiver)
+	receiver.ResumeAll()
 
 	log.Println("Syncing...")
 
-	if err = coCompletion(sender, receiver); err != nil {
-		t.Fatal(err)
-	}
+	rc.AwaitSync("default", sender, receiver)
 
 	// s2 should have five files (three plus two conflicts)
 
@@ -438,59 +449,87 @@ func TestResetConflicts(t *testing.T) {
 	}
 }
 
-func coSenderReceiver(t *testing.T) (syncthingProcess, syncthingProcess) {
-	log.Println("Starting sender...")
-	sender := syncthingProcess{ // id1
-		instance: "1",
-		argv:     []string{"-home", "h1"},
-		port:     8081,
-		apiKey:   apiKey,
-	}
-	err := sender.start()
+func TestConflictsSameContent(t *testing.T) {
+	log.Println("Cleaning...")
+	err := removeAll("s1", "s2", "h1/index*", "h2/index*")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	log.Println("Starting receiver...")
-	receiver := syncthingProcess{ // id2
-		instance: "2",
-		argv:     []string{"-home", "h2"},
-		port:     8082,
-		apiKey:   apiKey,
-	}
-	err = receiver.start()
+	err = os.Mkdir("s1", 0755)
 	if err != nil {
-		sender.stop()
+		t.Fatal(err)
+	}
+	err = os.Mkdir("s2", 0755)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	return sender, receiver
-}
+	// Two files on s1
 
-func coCompletion(p ...syncthingProcess) error {
-mainLoop:
-	for {
-		time.Sleep(2500 * time.Millisecond)
+	err = ioutil.WriteFile("s1/file1", []byte("hello\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ioutil.WriteFile("s1/file2", []byte("hello\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		tot := 0
-		for i := range p {
-			comp, err := p[i].peerCompletion()
-			if err != nil {
-				if isTimeout(err) {
-					continue mainLoop
-				}
-				return err
-			}
+	// Two files on s2, content differs in file1 only, timestamps differ on both.
 
-			for _, pct := range comp {
-				tot += pct
-			}
-		}
+	err = ioutil.WriteFile("s2/file1", []byte("goodbye\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ioutil.WriteFile("s2/file2", []byte("hello\n"), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		if tot == 100*(len(p)) {
-			return nil
-		}
+	ts := time.Now().Add(-time.Hour)
+	os.Chtimes("s2/file1", ts, ts)
+	os.Chtimes("s2/file2", ts, ts)
 
-		log.Printf("%d / %d...", tot, 100*(len(p)))
+	// Let them sync
+
+	sender := startInstance(t, 1)
+	defer checkedStop(t, sender)
+	receiver := startInstance(t, 2)
+	defer checkedStop(t, receiver)
+
+	sender.ResumeAll()
+	receiver.ResumeAll()
+
+	log.Println("Syncing...")
+
+	rc.AwaitSync("default", sender, receiver)
+
+	// Let conflict copies propagate
+
+	sender.Rescan("default")
+	receiver.Rescan("default")
+	rc.AwaitSync("default", sender, receiver)
+
+	log.Println("Verifying...")
+
+	// s1 should have three files
+
+	files, err := filepath.Glob("s1/file*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 3 {
+		t.Errorf("Expected 3 files in s1 instead of %d", len(files))
+	}
+
+	// s2 should have three files
+
+	files, err = filepath.Glob("s2/file*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 3 {
+		t.Errorf("Expected 3 files in s2 instead of %d", len(files))
 	}
 }

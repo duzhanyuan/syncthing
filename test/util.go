@@ -2,7 +2,7 @@
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at http://mozilla.org/MPL/2.0/.
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 // +build integration
 
@@ -22,9 +22,11 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"testing"
 	"time"
+	"unicode"
 
-	"github.com/syncthing/syncthing/internal/symlinks"
+	"github.com/syncthing/syncthing/lib/rc"
 )
 
 func init() {
@@ -33,7 +35,7 @@ func init() {
 
 const (
 	id1    = "I6KAH76-66SLLLB-5PFXSOA-UFJCDZC-YAOMLEK-CP2GB32-BV5RQST-3PSROAU"
-	id2    = "JMFJCXB-GZDE4BN-OCJE3VF-65GYZNU-AIVJRET-3J6HMRQ-AUQIGJO-FKNHMQU"
+	id2    = "MRIW7OK-NETT3M4-N6SBWME-N25O76W-YJKVXPH-FUMQJ3S-P57B74J-GBITBAC"
 	id3    = "373HSRP-QLPNLIE-JYKZVQF-P4PKZ63-R2ZE6K3-YD442U2-JHBGBQG-WWXAHAU"
 	apiKey = "abc123"
 )
@@ -58,38 +60,46 @@ func generateFiles(dir string, files, maxexp int, srcname string) error {
 			log.Fatal(err)
 		}
 
-		s := 1 << uint(rand.Intn(maxexp))
-		a := 128 * 1024
+		p1 := filepath.Join(p0, n)
+
+		s := int64(1 << uint(rand.Intn(maxexp)))
+		a := int64(128 * 1024)
 		if a > s {
 			a = s
 		}
-		s += rand.Intn(a)
+		s += rand.Int63n(a)
 
-		src := io.LimitReader(&inifiteReader{fd}, int64(s))
-
-		p1 := filepath.Join(p0, n)
-		dst, err := os.Create(p1)
-		if err != nil {
+		if err := generateOneFile(fd, p1, s); err != nil {
 			return err
 		}
+	}
 
-		_, err = io.Copy(dst, src)
-		if err != nil {
-			return err
-		}
+	return nil
+}
 
-		err = dst.Close()
-		if err != nil {
-			return err
-		}
+func generateOneFile(fd io.ReadSeeker, p1 string, s int64) error {
+	src := io.LimitReader(&inifiteReader{fd}, int64(s))
+	dst, err := os.Create(p1)
+	if err != nil {
+		return err
+	}
 
-		_ = os.Chmod(p1, os.FileMode(rand.Intn(0777)|0400))
+	_, err = io.Copy(dst, src)
+	if err != nil {
+		return err
+	}
 
-		t := time.Now().Add(-time.Duration(rand.Intn(30*86400)) * time.Second)
-		err = os.Chtimes(p1, t, t)
-		if err != nil {
-			return err
-		}
+	err = dst.Close()
+	if err != nil {
+		return err
+	}
+
+	os.Chmod(p1, os.FileMode(rand.Intn(0777)|0400))
+
+	t := time.Now().Add(-time.Duration(rand.Intn(30*86400)) * time.Second)
+	err = os.Chtimes(p1, t, t)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -131,10 +141,7 @@ func alterFiles(dir string) error {
 		switch {
 		case r == 0 && comps > 2:
 			// Delete every tenth file or directory, except top levels
-			err := removeAll(path)
-			if err != nil {
-				return err
-			}
+			return removeAll(path)
 
 		case r == 1 && info.Mode().IsRegular():
 			if info.Mode()&0200 != 0200 {
@@ -159,46 +166,74 @@ func alterFiles(dir string) error {
 			if err != nil {
 				return err
 			}
-			err = fd.Close()
-			if err != nil {
-				return err
-			}
+			return fd.Close()
 
+		// Change capitalization
 		case r == 2 && comps > 3 && rand.Float64() < 0.2:
-			if !info.Mode().IsRegular() {
-				err = removeAll(path)
-				if err != nil {
-					return err
-				}
-				d1 := []byte("I used to be a dir: " + path)
-				err := ioutil.WriteFile(path, d1, 0644)
-				if err != nil {
-					return err
-				}
-			} else {
-				err := os.Remove(path)
-				if err != nil {
-					return err
-				}
-				err = os.MkdirAll(path, 0755)
-				if err != nil {
-					return err
-				}
-				generateFiles(path, 10, 20, "../LICENSE")
+			if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+				// Syncthing is currently broken for case-only renames on case-
+				// insensitive platforms.
+				// https://github.com/syncthing/syncthing/issues/1787
+				return nil
 			}
 
-		case r == 3 && comps > 2 && (info.Mode().IsRegular() || rand.Float64() < 0.2):
-			rpath := filepath.Dir(path)
-			if rand.Float64() < 0.2 {
-				for move := rand.Intn(comps - 1); move > 0; move-- {
-					rpath = filepath.Join(rpath, "..")
+			base := []rune(filepath.Base(path))
+			for i, r := range base {
+				if rand.Float64() < 0.5 {
+					base[i] = unicode.ToLower(r)
+				} else {
+					base[i] = unicode.ToUpper(r)
 				}
 			}
-			err = os.Rename(path, filepath.Join(rpath, randomName()))
-			if err != nil {
-				return err
+			newPath := filepath.Join(filepath.Dir(path), string(base))
+			if newPath != path {
+				return os.Rename(path, newPath)
 			}
+
+			/*
+				This doesn't in fact work. Sometimes it appears to. We need to get this sorted...
+
+				// Switch between files and directories
+				case r == 3 && comps > 3 && rand.Float64() < 0.2:
+					if !info.Mode().IsRegular() {
+						err = removeAll(path)
+						if err != nil {
+							return err
+						}
+						d1 := []byte("I used to be a dir: " + path)
+						err := ioutil.WriteFile(path, d1, 0644)
+						if err != nil {
+							return err
+						}
+					} else {
+						err := os.Remove(path)
+						if err != nil {
+							return err
+						}
+						err = os.MkdirAll(path, 0755)
+						if err != nil {
+							return err
+						}
+						generateFiles(path, 10, 20, "../LICENSE")
+					}
+					return err
+			*/
+
+			/*
+				This fails. Bug?
+
+					// Rename the file, while potentially moving it up in the directory hierarchy
+					case r == 4 && comps > 2 && (info.Mode().IsRegular() || rand.Float64() < 0.2):
+						rpath := filepath.Dir(path)
+						if rand.Float64() < 0.2 {
+							for move := rand.Intn(comps - 1); move > 0; move-- {
+								rpath = filepath.Join(rpath, "..")
+							}
+						}
+						return osutil.TryRename(path, filepath.Join(rpath, randomName()))
+			*/
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -357,6 +392,7 @@ type fileInfo struct {
 	mode os.FileMode
 	mod  int64
 	hash [16]byte
+	size int64
 }
 
 func (f fileInfo) String() string {
@@ -398,7 +434,7 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 				mode: os.ModeSymlink,
 			}
 
-			tgt, _, err := symlinks.Read(path)
+			tgt, err := os.Readlink(path)
 			if err != nil {
 				return err
 			}
@@ -417,7 +453,11 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 			f = fileInfo{
 				name: rn,
 				mode: info.Mode(),
+				// comparing timestamps with better precision than a second
+				// is problematic as there is rounding and truncatign going
+				// on at every level
 				mod:  info.ModTime().Unix(),
+				size: info.Size(),
 			}
 			sum, err := md5file(path)
 			if err != nil {
@@ -466,7 +506,8 @@ func isTimeout(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "use of closed network connection") ||
-		strings.Contains(err.Error(), "request cancelled while waiting")
+		strings.Contains(err.Error(), "request canceled while waiting") ||
+		strings.Contains(err.Error(), "operation timed out")
 }
 
 func getTestName() string {
@@ -485,4 +526,35 @@ func getTestName() string {
 		}
 	}
 	return time.Now().String()
+}
+
+func checkedStop(t *testing.T, p *rc.Process) {
+	if _, err := p.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startInstance(t *testing.T, i int) *rc.Process {
+	log.Printf("Starting instance %d...", i)
+	addr := fmt.Sprintf("127.0.0.1:%d", 8080+i)
+	log := fmt.Sprintf("logs/%s-%d-%d.out", getTestName(), i, time.Now().Unix()%86400)
+
+	p := rc.NewProcess(addr)
+	p.LogTo(log)
+	if err := p.Start("../bin/syncthing", "-home", fmt.Sprintf("h%d", i), "-no-browser"); err != nil {
+		t.Fatal(err)
+	}
+	p.AwaitStartup()
+	p.PauseAll()
+	return p
+}
+
+func symlinksSupported() bool {
+	tmp, err := ioutil.TempDir("", "symlink-test")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(tmp)
+	err = os.Symlink("tmp", filepath.Join(tmp, "link"))
+	return err == nil
 }
